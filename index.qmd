@@ -1,0 +1,164 @@
+---
+title: "Minprojekt"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Genomová assembly
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyjson)
+library(knitr)
+```
+
+### Úvod
+
+Cílem tohoto miniprojektu bylo vyhodnotit vliv zpracování nanoporových sekvenačních dat (raw reads) na výslednou kvalitu genomové assembly. Pipeline byla testována na čtyřech reálných vzorcích: B04, B09, B10 a B16.
+
+V rámci kontroly kvality a filtrace dat (QC) byly porovnány dva přístupy:
+
+1\. QC pomocí nástroje `fastplong` ,
+
+2\. kombinace nástrojů `porechop` (odstranění adaptérů) a `filtlong` (filtrace podle délky a kvality) - working name = `choplong`.
+
+Následná byla vytvořena assembly pomocí nástroje `Flye`. Každá assembly byla následně analyzována ve dvou variantách – v původním stavu a po aplikaci nástroje `Medaka` pro opravu chyb v sekvenci. Kvalita všech výsledných sestav byla validována pomocí nástroje `BUSCO`, který vyhledává evolučně konzervované markerové geny (v tomto případě z příslušné linie *hyphomicrobiales* obsahující celkem 666 markerů).
+
+### Import dat
+
+```{r}
+files <- list.files(pattern = "*.json", full.names = TRUE, recursive = TRUE)
+  
+data <- tibble(folder = files) %>%
+  separate_wider_delim(
+    delim = "/", 
+    folder, 
+    names = c(NA, "assembly", "QC", "sample"), 
+    too_many = "drop", cols_remove = FALSE
+  ) %>%
+  mutate(json = map_chr(folder, read_file)) %>%
+  as_tbl_json("json") %>%
+  enter_object("results") %>%
+  spread_all() %>%
+  as_tibble() %>%
+  select(-c(folder)) %>%
+  # Všechny plošné úpravy uděláme na jednom místě zde:
+  mutate(
+    chemistry = if_else(sample == "B16", "R9.4.1", "R10.4.1"),
+    `Complete percentage` = round(`Complete percentage`, 2)
+  )
+```
+
+### Úplnost markerových genů napříč vzorky (v absolutních číslech)
+
+```{r}
+busco_colors <- c(
+  "Complete"   = "#2ca02c",
+  "Fragmented" = "#ff7f0e",
+  "Missing"    = "#d62728"
+)
+```
+
+```{r}
+data %>%
+  select(sample, chemistry, QC, assembly, `Complete BUSCOs`, `Fragmented BUSCOs`, `Missing BUSCOs`) %>%
+  pivot_longer(
+    cols = c(`Complete BUSCOs`, `Fragmented BUSCOs`, `Missing BUSCOs`),
+    names_to = "busco_status",
+    values_to = "count"
+  ) %>%
+  mutate(busco_status = str_remove(busco_status, " BUSCOs")) %>%
+  # Data tečou přímo do grafu, neukládáme žádnou mezitabulku
+  ggplot(aes(x = assembly, y = count, fill = busco_status)) +
+  geom_col(position = "stack", width = 0.6) +
+  facet_grid(QC ~ sample) +
+  scale_fill_manual(values = busco_colors) +
+  labs(
+    title = "Absolutní počty markerových genů podle vzorků",
+    x = "Úprava assembly",
+    y = "Počet genů",
+    fill = "Úplnost markerových genů"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+Z grafu je patrné, že většina vzorků (B04, B09, B10) dosahuje vysoké kompletnosti již v základním nastavení a rozdíly mezi metodami jsou vizuálně těžko rozpoznatelné. Zcela zásadně se však odlišuje vzorek **B16**, který obsahuje vyšší podíl fragmentovaných a chybějících genů. Tento rozdíl je způsoben jiným modelem Nanopore použitým při basecallingu: zatímco první tři vzorky byly sekvenovány na moderní nanoporovové technologii/chemii verze **R10.4.1**, sekvenační data vzorku B16 pochází ze starší generace **R9.4.1**, která vykazuje vyšší chybovost.
+
+### Srovnání vlivu medaka polishingu
+
+Jelikož verze R10.4.1 generuje tak přesná data, že vizuální rozdíly pro tento počet marketů na předchozích grafech splývají, rozhodl jsem se k vizualizaci dat přistoupit ještě trochu jinak.
+
+Zaměřil jsem se tak na metriku `Complete percentage`. Osu Y záměrně omezuji na rozsah **80 % až 100 %** za cílem usnadnit identifikaci malých rozdílů mezi QC metodami. Vzorky jsou barevně rozlišeny podle použité chemie sekvenování.
+
+```{r}
+data %>%
+  ggplot(aes(x = assembly, y = `Complete percentage`, group = sample)) +
+  geom_line(aes(color = chemistry), linewidth = 0.8, alpha = 0.6) +
+  geom_point(aes(color = chemistry), size = 2) +
+  facet_wrap(~ QC) +
+  scale_color_manual(values = c("R9.4.1" = "#e41a1c", "R10.4.1" = "#377eb8")) +
+  coord_cartesian(ylim = c(80, 100)) +
+  theme_bw() +
+  labs(
+    title = "Vliv Medaka polishingu pro různé QC metody a verze Nanopore",
+    x = "Krok úpravy assembly",
+    y = "Kompletnost",
+    color = "Verze chemie"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+Z grafu lze vyčíst následující závěry:
+
+**a) Vliv polishingu:**
+
+Použití nástroje medaka nemá drastický dopad na výslednou hodnotu úplnosti genomů - spojnice jsou prakticky horizontální. Lze tedy říci, že polishing je v tomto případě zanedbatelný a i když tento krok vynecháme, dosáhneme prakticky stejně dobrého výsledku.
+
+**b) Porovnání fastplong (postup 1) vs. porechop + filtlong (postup 2):**
+
+Zde se projevuje vliv použité chemie. Pro vzorky sekvenované verzí **R10.4.1 (modré body)** jsou oba postupy QC stejně dobré. Raw data z R10.4.1 jsou tedy poměrně přesná a neobsahují příliš chyb sama o sobě.
+
+Naopak u vzorku B16 sekvenovaného verzí **R9.4.1 (červené body)** vidíme nárůst kompletnosti směrem nahoru při QC provedeném pomocí nástroje `fastplong` - i když jen o pár procent.
+
+### Souhrnná tabulka
+
+Jako doplnění pro ještě snazší a přehlednější orientaci v datech.
+
+```{r}
+data %>%
+  select(sample, chemistry, QC, assembly, `Complete percentage`, 
+         `Complete BUSCOs`, `Fragmented BUSCOs`, `Missing BUSCOs`) %>%
+  mutate(
+    summary_value = paste0(
+      `Complete percentage`, " % (", 
+      `Complete BUSCOs`, " / ", 
+      `Fragmented BUSCOs`, " / ", 
+      `Missing BUSCOs`, ")"
+    )
+  ) %>%
+  select(sample, chemistry, QC, assembly, summary_value) %>%
+  pivot_wider(
+    names_from = assembly, 
+    values_from = summary_value
+  ) %>%
+  arrange(desc(chemistry), sample) %>%
+  kable(
+    col.names = c("Vzorek", "Chemie", "QC Metoda", "Bez Medaky", "S Medakou"),
+    caption = "Tabulka: Detailní srovnání BUSCO výsledků. Formát uvádí: Kompletnost v % (Počet Complete / Fragmented / Missing genů z celkových 666)."
+  )
+```
+
+### Závěr
+
+Z provedené analýzy vyplývá, že pro moderní nanoporová data (chemie R10.4.1) jsou oba přístupy kontroly kvality (`fastplong` i `porechop+filtlong`) rovnocenné a dodatečný polishing nástrojem `Medaka` již nezvyšuje kompletnost assembly měřenou pomocí BUSCO markerů. Naopak u sekvenačních dat získaných verzí R9.4.1 bych na základě těchto výsledků doporučil používat pro QC spíše nástroj `fastplong` namísto pipeline dvojice nástrojů `porechop` a `filtlong`. Medaka však opět není nutná.
