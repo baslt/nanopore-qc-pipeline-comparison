@@ -1,5 +1,7 @@
 # Nanopore Assembly QC & Evaluation
 
+https://baslt.github.io/nanopore-qc-pipeline-comparison/
+
 Tento miniprojekt se zabývá hodnocením vlivu QC metod (`fastplong` vs. `porechop` + `filtlong`) a consensus polishingu (`Medaka`) na kvalitu *de novo* genomové assembly vytvořené nástrojem `Flye`.
 
 ## Klíčové závěry
